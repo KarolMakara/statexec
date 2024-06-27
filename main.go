@@ -42,7 +42,9 @@ var (
 	metricStore     []InstantMetric
 	annotationStore []GrafanaAnnotation
 
-	commandTimeout time.Duration
+	commandTimeout   int64
+	delayBeforeSync  int64
+	syncUntilSucceed bool = false
 )
 
 const (
@@ -103,7 +105,7 @@ func main() {
 	switch role {
 	case "standalone":
 		if commandTimeout > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(commandTimeout)*time.Second)
 			defer cancel()
 			execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 			startCommand(execCmd)
@@ -135,6 +137,8 @@ func usage() {
 	fmt.Printf("  --connect, -c <ip>         %sCONNECT            Connect to server on <ip> (no default)\n", EnvVarPrefix)
 	fmt.Printf("  --sync-port, -sp <port>    %sSYNC_PORT          Sync port (default: 8080)\n", EnvVarPrefix)
 	fmt.Printf("  --sync-start-only, -sso    %sSYNC_START_ONLY    Sync start only (default: false)\n", EnvVarPrefix)
+	fmt.Printf("  --delay-before-sync, -dbs                       Client waits in seconds before sync with server\n")
+	fmt.Printf("  --sync-until-succeed, -sus                      Client syncs with server until succeed\n")
 	fmt.Println("Other options:")
 	fmt.Printf("  --command-timeout, -cmdt       Sets timeout for running command\n")
 	fmt.Printf("  --version, -v                  Print version and exit\n")
@@ -182,6 +186,7 @@ func parseArgs() []string {
 			role = "client"
 			serverIp = os.Args[i+1]
 			i++
+
 		case "-s", "--server":
 			if role == "client" {
 				fmt.Println("Error: server and client modes are mutually exclusive")
@@ -192,6 +197,7 @@ func parseArgs() []string {
 		case "-sp", "--sync-port":
 			syncPort = os.Args[i+1]
 			i++
+
 		case "-sso", "--sync-start-only":
 			syncWaitForStop = false
 
@@ -241,12 +247,30 @@ func parseArgs() []string {
 					fmt.Println("Error parsing command timeout:", err)
 					os.Exit(1)
 				}
-				commandTimeout = time.Duration(timeout) * time.Second
+				commandTimeout = timeout
 				i++
 			} else {
 				fmt.Println("Missing value for command timeout argument.")
 				os.Exit(1)
 			}
+
+		case "-dbs", "--delay-before-sync":
+			if i+1 < len(os.Args) {
+				timeStr := os.Args[i+1]
+				time, err := strconv.ParseInt(timeStr, 10, 64)
+				if err != nil {
+					fmt.Println("Error parsing delay before sync:", err)
+					os.Exit(1)
+				}
+				delayBeforeSync = time
+				i++
+			} else {
+				fmt.Println("Missing value for delay before sync.")
+				os.Exit(1)
+			}
+
+		case "-sus", "--sync-until-succeed":
+			syncUntilSucceed = true
 
 		case "-v", "--version":
 			fmt.Println(version)
@@ -351,12 +375,30 @@ func parseEnvVars() {
 
 	// Command timeout in seconds (-cmdt, --command-timeout)
 	if value := os.Getenv(EnvVarPrefix + "COMMAND_TIMEOUT"); value != "" {
-		timeout, err := strconv.ParseInt(value, 10, 64)
+		cmdTime, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
 			fmt.Println("Error parsing "+EnvVarPrefix+"COMMAND_TIMEOUT env var, must be an int64 (time in s), found : ", value)
 			os.Exit(1)
 		}
-		commandTimeout = time.Duration(timeout) * time.Second
+		commandTimeout = cmdTime
+	}
+
+	// Wait client syncs in seconds (-dbs, --delay-before-sync)
+	if value := os.Getenv(EnvVarPrefix + "SYNC_TIMEOUT"); value != "" {
+		syncTime, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			fmt.Println("Error parsing "+EnvVarPrefix+"SYNCTIMEOUT env var, must be an int64 (time in s), found : ", value)
+			os.Exit(1)
+		}
+		delayBeforeSync = syncTime
+	}
+
+	// Makes client posts until get 200 error code (-sus, --sync-until-succeed)
+	if value := os.Getenv(EnvVarPrefix + "SYNC_UNTIL_SUCCEED"); value != "" {
+		// If value of syncStartOnly is "true", set syncWaitForStop to false
+		if value == "true" {
+			syncUntilSucceed = true
+		}
 	}
 
 	// Get extra labels from environment variables (-l, --label)
@@ -400,11 +442,44 @@ func parseExtraLabelsFromEnv() map[string]string {
 
 func syncStartCommand(cmd *exec.Cmd, syncServerUrl string, syncStop bool) {
 
+	if delayBeforeSync > 0 {
+		time.Sleep(time.Duration(delayBeforeSync) * time.Second)
+	}
+
+	rt := 1
+	maxRetries := 100
+
 	// Sending start sync at server
-	_, err := http.Post(syncServerUrl+"/start", "text/plain", nil)
-	if err != nil {
-		fmt.Println("Error sending start sync request:", err)
-		os.Exit(1)
+	if !syncUntilSucceed {
+		_, err := http.Post(syncServerUrl+"/start", "text/plain", nil)
+		if err != nil {
+			fmt.Println("Error sending start sync request:", err)
+			os.Exit(1)
+		} else {
+			rt = -1
+		}
+	}
+
+	for {
+
+		if rt == -1 {
+			break
+		}
+
+		if rt >= maxRetries {
+			fmt.Println("Exceeded max retries for syncing with server")
+			os.Exit(1)
+		}
+
+		_, err := http.Post(syncServerUrl+"/start", "text/plain", nil)
+		if err == nil {
+			fmt.Println("Connected to server at", serverIp)
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+
+		rt++
 	}
 
 	// Start the command
