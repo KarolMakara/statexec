@@ -41,6 +41,8 @@ var (
 
 	metricStore     []InstantMetric
 	annotationStore []GrafanaAnnotation
+
+	commandTimeout time.Duration
 )
 
 const (
@@ -100,7 +102,14 @@ func main() {
 	// Start statexec in the right mode
 	switch role {
 	case "standalone":
-		startCommand(execCmd)
+		if commandTimeout > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+			defer cancel()
+			execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+			startCommand(execCmd)
+		} else {
+			startCommand(execCmd)
+		}
 	case "client":
 		syncStartCommand(execCmd, fmt.Sprintf("http://%s:%s", serverIp, syncPort), syncWaitForStop)
 	case "server":
@@ -127,9 +136,10 @@ func usage() {
 	fmt.Printf("  --sync-port, -sp <port>    %sSYNC_PORT          Sync port (default: 8080)\n", EnvVarPrefix)
 	fmt.Printf("  --sync-start-only, -sso    %sSYNC_START_ONLY    Sync start only (default: false)\n", EnvVarPrefix)
 	fmt.Println("Other options:")
-	fmt.Printf("  --version, -v        Print version and exit\n")
-	fmt.Printf("  --help, -help, -h    Print help and exit\n")
-	fmt.Printf("  --                   Stop parsing arguments\n")
+	fmt.Printf("  --command-timeout, -cmdt       Sets timeout for running command\n")
+	fmt.Printf("  --version, -v                  Print version and exit\n")
+	fmt.Printf("  --help, -help, -h              Print help and exit\n")
+	fmt.Printf("  --                             Stop parsing arguments\n")
 	fmt.Println("")
 	fmt.Println("Standalone examples:")
 	fmt.Printf("  %s ping 8.8.8.8 -c 4\n", binself)
@@ -222,6 +232,21 @@ func parseArgs() []string {
 				os.Exit(1)
 			}
 			i++
+
+		case "-cmdt", "--command-timeout":
+			if i+1 < len(os.Args) {
+				timeoutStr := os.Args[i+1]
+				timeout, err := strconv.ParseInt(timeoutStr, 10, 64)
+				if err != nil {
+					fmt.Println("Error parsing command timeout:", err)
+					os.Exit(1)
+				}
+				commandTimeout = time.Duration(timeout) * time.Second
+				i++
+			} else {
+				fmt.Println("Missing value for command timeout argument.")
+				os.Exit(1)
+			}
 
 		case "-v", "--version":
 			fmt.Println(version)
@@ -322,6 +347,16 @@ func parseEnvVars() {
 			os.Exit(1)
 		}
 		delayAfterCommand = timeToWaitInScd
+	}
+
+	// Command timeout in seconds (-cmdt, --command-timeout)
+	if value := os.Getenv(EnvVarPrefix + "COMMAND_TIMEOUT"); value != "" {
+		timeout, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			fmt.Println("Error parsing "+EnvVarPrefix+"COMMAND_TIMEOUT env var, must be an int64 (time in s), found : ", value)
+			os.Exit(1)
+		}
+		commandTimeout = time.Duration(timeout) * time.Second
 	}
 
 	// Get extra labels from environment variables (-l, --label)
@@ -496,23 +531,33 @@ func startCommand(cmd *exec.Cmd) {
 		time.Sleep(time.Duration(delayBeforeCommand) * time.Second)
 	}
 
-	// Catch interrupt signal and forward it to the child process
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
+	if commandTimeout > 0 {
 
-	go func() {
-		sig := <-sigs
-		// Transmettre le signal SIGINT au processus enfant
-		if err := cmd.Process.Signal(sig); err != nil {
-			panic(err)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		// Run command and wait until timeout end to kill process
+		err := cmd.Run()
+		if err != nil {
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
-	}()
+	} else {
+		// Catch interrupt signal and forward it to the child process
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT)
 
-	// Start the command
-	err = cmd.Start()
-	if err != nil {
-		fmt.Println("Error starting command:", err)
-		os.Exit(1)
+		go func() {
+			sig := <-sigs
+			// Transmettre le signal SIGINT au processus enfant
+			if err := cmd.Process.Signal(sig); err != nil {
+				panic(err)
+			}
+		}()
+
+		// Start the command
+		err = cmd.Start()
+		if err != nil {
+			fmt.Println("Error starting command:", err)
+			os.Exit(1)
+		}
 	}
 
 	commandState = CommandStatusRunning

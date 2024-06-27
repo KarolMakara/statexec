@@ -243,3 +243,8 @@ True to our ethos of community and collaboration, we're pleased to share statexe
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+
+
+## Fork additions
+
+I added command timeout to kill proces after specific period of time. It is needed for kubernetes_job to exit sucessfully with gathered metrics.
