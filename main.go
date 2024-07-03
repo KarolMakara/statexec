@@ -45,6 +45,7 @@ var (
 	commandTimeout   int64
 	delayBeforeSync  int64
 	syncUntilSucceed bool = false
+	logFilePath      string
 )
 
 const (
@@ -141,6 +142,7 @@ func usage() {
 	fmt.Printf("  --sync-until-succeed, -sus                      Client syncs with server until succeed\n")
 	fmt.Println("Other options:")
 	fmt.Printf("  --command-timeout, -cmdt       Sets timeout for running command\n")
+	fmt.Printf("  --log-file, -lf                File for stderr and stdout\n")
 	fmt.Printf("  --version, -v                  Print version and exit\n")
 	fmt.Printf("  --help, -help, -h              Print help and exit\n")
 	fmt.Printf("  --                             Stop parsing arguments\n")
@@ -272,6 +274,10 @@ func parseArgs() []string {
 		case "-sus", "--sync-until-succeed":
 			syncUntilSucceed = true
 
+		case "-lf", "--log-file":
+			logFilePath = os.Args[i+1]
+			i++
+
 		case "-v", "--version":
 			fmt.Println(version)
 			os.Exit(0)
@@ -399,6 +405,10 @@ func parseEnvVars() {
 		if value == "true" {
 			syncUntilSucceed = true
 		}
+	}
+
+	if value := os.Getenv(EnvVarPrefix + "LOG_FILE_PATH"); value != "" {
+		logFilePath = value
 	}
 
 	// Get extra labels from environment variables (-l, --label)
@@ -585,10 +595,25 @@ func startCommand(cmd *exec.Cmd) {
 		metricsStartTime = realStartTime.UnixMilli()
 	}
 
-	// Connect the command's standard input/output/error to those of the program
+	var logFile *os.File
+
+	if logFilePath != "" {
+		var err error
+		logFile, err = os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Println("Error opening log file:", err)
+			os.Exit(1)
+		}
+		defer logFile.Close()
+
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+	}
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
 	// Channel to signal when to stop gathering metrics
 	quit := make(chan struct{})
