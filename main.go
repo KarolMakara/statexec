@@ -102,17 +102,16 @@ func main() {
 	// Create command to execute
 	execCmd := exec.Command(cmd[0], cmd[1:]...)
 
+	if commandTimeout > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(commandTimeout)*time.Second)
+		defer cancel()
+		execCmd = exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	}
+
 	// Start statexec in the right mode
 	switch role {
 	case "standalone":
-		if commandTimeout > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(commandTimeout)*time.Second)
-			defer cancel()
-			execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
-			startCommand(execCmd)
-		} else {
-			startCommand(execCmd)
-		}
+		startCommand(execCmd)
 	case "client":
 		syncStartCommand(execCmd, fmt.Sprintf("http://%s:%s", serverIp, syncPort), syncWaitForStop)
 	case "server":
